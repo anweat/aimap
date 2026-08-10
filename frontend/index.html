@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- 禁止缓存:确保前端更新后立即生效,避免"改代码不生效" -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>AIMap — AI 论文领域地图</title>
+  <link rel="stylesheet" href="css/style.css" />
+  <!-- 本地 vendor(不依赖外网 CDN);importmap 供 three.js ES module 解析 -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three.module.js",
+        "three/addons/": "./vendor/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">🧭 AIMap <span class="sub">AI 论文领域地图</span></div>
+    <div class="search-box">
+      <input id="searchInput" type="text" placeholder="搜索论文标题 / 摘要 / 作者…(回车跳转)" />
+      <button id="searchBtn">搜索</button>
+    </div>
+    <div class="actions">
+      <input id="crawlQuery" type="text" placeholder="arXiv 检索式,如: large language model" />
+      <button id="crawlBtn">采集 arXiv</button>
+      <button id="crawlCount" class="count-btn" title="采集数量">20</button>
+    </div>
+    <div class="status" id="statusBar">初始化中…</div>
+  </header>
+
+  <!-- 初始化日志面板(可折叠,便于排查) -->
+  <div id="logPanel" class="log-panel hidden">
+    <div class="log-head">
+      <span>运行日志</span>
+      <button id="logToggle" class="mini-btn">收起</button>
+    </div>
+    <div id="logBody" class="log-body"></div>
+  </div>
+
+  <!-- 全局错误横幅 -->
+  <div id="errorBanner" class="error-banner hidden"></div>
+
+  <main class="layout">
+    <!-- 左侧:分页(总览 / 数据源 / 领域树) -->
+    <section class="panel tree-panel">
+      <div class="sidebar-tabs">
+        <button data-page="overview" class="active">📊 总览</button>
+        <button data-page="sources">📡 数据源</button>
+        <button data-page="tree">🌳 领域树</button>
+      </div>
+
+      <div id="page-overview" class="sidebar-page">
+        <h2>论文统计 <small id="statsInfo"></small></h2>
+        <div id="statsBox" class="overview-box"><div class="loading-hint">加载中…</div></div>
+        <h2>研究方向总览 <small id="overviewInfo"></small>
+          <button id="evolveBtn" class="mini-btn" style="float:right" title="LLM 按论文数聚类热门领域,建议细分方向">🧬 演化</button>
+        </h2>
+        <div id="overviewBox" class="overview-box"><div class="loading-hint">加载中…</div></div>
+      </div>
+
+      <div id="page-sources" class="sidebar-page hidden">
+        <h2>数据源 <small id="srcInfo"></small>
+          <button id="addSourceBtn" class="mini-btn" style="float:right">+ 添加</button>
+        </h2>
+        <div id="sourceList" class="source-list"><div class="loading-hint">加载中…</div></div>
+      </div>
+
+      <div id="page-tree" class="sidebar-page hidden">
+        <h2>领域树 <small id="treeStats"></small></h2>
+        <div id="treeContainer" class="tree-container"><div class="loading-hint">加载中…</div></div>
+      </div>
+    </section>
+
+    <!-- 右侧:四元数地图 -->
+    <section class="panel map-panel">
+      <h2 id="mapTitle">四元数领域地图
+        <small id="mapSub">拖动旋转 · 滚轮缩放 · 单击论文详情 · 双击领域进入子领域</small>
+      </h2>
+      <div id="breadcrumb" class="breadcrumb"></div>
+      <div class="map-controls">
+        <button id="panBtn" title="切换拖动模式:旋转 / 平移视图中心">🔄 旋转</button>
+        <button id="upBtn" class="hidden" title="返回上一级领域">⬆ 返回</button>
+        <button id="rotateBtn" title="切换自动旋转">⏸ 暂停旋转</button>
+        <button id="homeBtn" title="对齐零点并回到根视图">⏺ 零点</button>
+        <button id="colorModeBtn" class="active" title="切换论文着色方式">🎨 视角着色</button>
+      </div>
+      <div class="map-legend">
+        <span class="lg-item"><span class="lg-dot" style="background:#58a6ff"></span>模型</span>
+        <span class="lg-item"><span class="lg-dot" style="background:#3fb950"></span>算法</span>
+        <span class="lg-item"><span class="lg-dot" style="background:#d29922"></span>infra</span>
+        <span class="lg-item"><span class="lg-dot" style="background:#bc8cff"></span>学科(切换后)</span>
+      </div>
+      <div id="mapContainer" class="map-container"><div class="loading-hint">加载中…</div></div>
+    </section>
+  </main>
+
+  <!-- 论文列表 -->
+  <section class="papers-section">
+    <div class="papers-head">
+      <h2 id="papersTitle">论文列表</h2>
+      <span id="papersCount" class="count-badge"></span>
+    </div>
+    <div id="papersList" class="papers-list"></div>
+  </section>
+
+  <!-- 论文详情弹窗 -->
+  <div id="detailModal" class="modal hidden">
+    <div class="modal-card">
+      <button class="modal-close" id="modalClose">✕</button>
+      <div id="modalBody"></div>
+    </div>
+  </div>
+
+  <!-- 数据源编辑弹窗 -->
+  <div id="sourceModal" class="modal hidden">
+    <div class="modal-card">
+      <button class="modal-close" id="srcModalClose">✕</button>
+      <h3 id="srcModalTitle">添加数据源</h3>
+      <div class="src-form">
+        <label>名称 <input id="srcName" type="text" placeholder="如: arxiv / my-mirror" /></label>
+        <label>显示名 <input id="srcDisplay" type="text" placeholder="如: arXiv 镜像" /></label>
+        <label>类型
+          <select id="srcType">
+            <option value="open">open(公开 API)</option>
+            <option value="library">library(需登录)</option>
+          </select>
+        </label>
+        <label>API 端点 <input id="srcApiUrl" type="text" placeholder="https://… (open 类型)" /></label>
+        <label class="src-check"><input id="srcEnabled" type="checkbox" checked /> 启用该来源</label>
+        <div class="btn-row">
+          <button id="srcSaveBtn">保存</button>
+          <button class="btn-ghost" id="srcCancelBtn">取消</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="js/map.js"></script>
+  <script type="module" src="js/tree.js"></script>
+  <script type="module" src="js/sources.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
