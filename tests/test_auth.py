@@ -21,9 +21,15 @@ def manager(tmp_path):
 # ---------- 登录信号检测(纯逻辑,无需浏览器) ----------
 
 def test_cookie_auth_detection(manager):
-    assert manager._cookie_is_auth({"name": "sessionid"}) is True
-    assert manager._cookie_is_auth({"name": "ASP.NET_SessionId"}) is True
+    # 真正的登录态 cookie
     assert manager._cookie_is_auth({"name": "auth_token"}) is True
+    assert manager._cookie_is_auth({"name": "SESSION_TOKEN"}) is True
+    assert manager._cookie_is_auth({"name": "XPLORE_AUTH"}) is True
+    # 游客态也会有的 cookie(应用会话 ID / 跟踪 / CSRF),不代表登录
+    assert manager._cookie_is_auth({"name": "sessionid"}) is False
+    assert manager._cookie_is_auth({"name": "ASP.NET_SessionId"}) is False
+    assert manager._cookie_is_auth({"name": "JSESSIONID"}) is False
+    assert manager._cookie_is_auth({"name": "_ga"}) is False
     assert manager._cookie_is_auth({"name": "csrftoken"}) is False
     assert manager._cookie_is_auth({"name": "gad_clientid"}) is False
 

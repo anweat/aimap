@@ -57,7 +57,7 @@ def _probe_library(session: Session, source: SourceConfig) -> dict:
         result["session"] = False
 
     if not has_credentials:
-        result["suggestions"].append("未配置账号:请在数据源面板或 .env 填写账号密码")
+        result["suggestions"].append("未配置账号:请在数据源面板(📡 数据源 → ✏️ 编辑)填写账号密码")
     if not result["session"]:
         result["suggestions"].append("无登录会话:运行 python scripts/library_login.py "
                                      f"--source {source.name} 完成浏览器登录")

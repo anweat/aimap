@@ -152,6 +152,9 @@ class SourcePayload(BaseModel):
     source_type: str = Field(default="open", pattern="^(open|library)$")
     enabled: bool = True
     config: dict = Field(default_factory=dict)   # api_url / delay 等
+    # 图书馆凭据(library 类型):None 表示不修改;空串表示清除;明文仅存于内存,加密落盘
+    account: str | None = Field(default=None, max_length=200)
+    password: str | None = Field(default=None, max_length=200)
 
 
 @router.get("/sources")
@@ -173,10 +176,21 @@ def sources_list():
                     "last_crawl_at": src.last_crawl_at.isoformat() if src.last_crawl_at else None,
                     "last_crawl_stats": _json.loads(src.last_crawl_stats or "{}"),
                     "session": _session_status(src),
+                    "credential": _credential_status(src),
                 }
                 for src in rows
             ]
         }
+
+
+def _credential_status(src) -> dict | None:
+    """library 来源的账号配置状态(open 来源返回 None)。"""
+    if src.source_type != "library":
+        return None
+    return {
+        "configured": settings.has_library_credential(src.name),
+        "account_mask": settings.masked_library_account(src.name),
+    }
 
 
 def _session_status(src) -> dict | None:
@@ -248,6 +262,43 @@ def source_login(name: str, timeout: int = 600):
     }
 
 
+@router.post("/sources/{name}/manual-login")
+def source_manual_login(name: str):
+    """图书馆手动登录(Web):后台弹出浏览器,用户登录后点「确认保存」。
+
+    适用于跳转到学校统一认证(CARSI/Shibboleth/CAS)的场景。
+    """
+    from app.crawler.auth import PlaywrightLoginManager
+    from app.crawler.manual import start
+    from app.db import get_source
+
+    with get_session() as s:
+        source = get_source(s, name)
+        if source is None:
+            raise HTTPException(status_code=404, detail=f"数据源 {name} 不存在")
+        if source.source_type != "library":
+            raise HTTPException(status_code=400, detail=f"{name} 为公开源,无需登录")
+    if name not in PlaywrightLoginManager.SITES:
+        raise HTTPException(status_code=400, detail=f"{name} 不在内置图书馆站点(ieee/acm/cnki)内")
+    return start(name)
+
+
+@router.post("/sources/{name}/manual-login/confirm")
+def source_manual_login_confirm(name: str):
+    """确认保存手动登录会话(前端「确认保存」按钮)。"""
+    from app.crawler.manual import confirm
+
+    return confirm(name)
+
+
+@router.get("/sources/{name}/manual-login")
+def source_manual_login_status(name: str):
+    """查询该来源是否有进行中的手动登录。"""
+    from app.crawler.manual import status
+
+    return status(name)
+
+
 @router.post("/sources")
 def source_create(payload: SourcePayload):
     import json as _json
@@ -268,6 +319,7 @@ def source_create(payload: SourcePayload):
                 config=_json.dumps(payload.config, ensure_ascii=False),
             ),
         )
+        _store_credentials(payload)
         return {"name": src.name, "status": "created"}
 
 
@@ -293,7 +345,23 @@ def source_update(name: str, payload: SourcePayload):
                 config=_json.dumps(payload.config, ensure_ascii=False),
             ),
         )
+        _store_credentials(payload)
         return {"name": src.name, "status": "updated"}
+
+
+def _store_credentials(payload: SourcePayload) -> None:
+    """library 来源:把账号/密码写入 SecretVault(加密)。
+
+    account/password 为 None 时不修改;空字符串时清除对应字段。
+    """
+    if payload.source_type != "library":
+        return
+    if payload.account is not None or payload.password is not None:
+        settings.store_library_credential(
+            payload.name,
+            account=payload.account,
+            password=payload.password,
+        )
 
 
 @router.delete("/sources/{name}")

@@ -606,8 +606,22 @@ function openSourceModal(name) {
   $("srcDisplay").value = src ? src.display_name || "" : "";
   $("srcType").value = src ? src.source_type : "open";
   $("srcApiUrl").value = src && src.config ? src.config.api_url || "" : "";
+  $("srcAccount").value = "";
+  $("srcPassword").value = "";
+  const cred = src && src.credential;
+  $("srcAccount").placeholder = cred && cred.account_mask
+    ? `已配置: ${cred.account_mask}(留空不修改)`
+    : "图书馆账号(学号/用户名),留空不修改";
   $("srcEnabled").checked = src ? src.enabled : true;
+  _syncCredBlock();
   $("sourceModal").classList.remove("hidden");
+}
+
+function _syncCredBlock() {
+  const isLib = $("srcType").value === "library";
+  $("srcCredBlock").classList.toggle("hidden", !isLib);
+  const apiLabel = $("srcApiUrl").closest("label");
+  if (apiLabel) apiLabel.classList.toggle("hidden", isLib);
 }
 
 async function saveSource() {
@@ -620,6 +634,13 @@ async function saveSource() {
     enabled: $("srcEnabled").checked,
     config: { api_url: $("srcApiUrl").value.trim() },
   };
+  // library 类型:账号/密码留空 = 不修改(避免误清空);填写才随 payload 提交
+  if (payload.source_type === "library") {
+    const account = $("srcAccount").value.trim();
+    const password = $("srcPassword").value;
+    if (account) payload.account = account;
+    if (password) payload.password = password;
+  }
   try {
     const url = editingSource ? `/api/sources/${editingSource}` : "/api/sources";
     const method = editingSource ? "PUT" : "POST";
@@ -642,6 +663,7 @@ async function saveSource() {
 }
 
 $("addSourceBtn").addEventListener("click", () => openSourceModal(null));
+$("srcType").addEventListener("change", _syncCredBlock);
 $("srcSaveBtn").addEventListener("click", saveSource);
 $("srcCancelBtn").addEventListener("click", () => $("sourceModal").classList.add("hidden"));
 $("srcModalClose").addEventListener("click", () => $("sourceModal").classList.add("hidden"));

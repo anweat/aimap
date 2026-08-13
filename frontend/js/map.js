@@ -128,13 +128,15 @@ class Map3DRenderer {
     const w = this.container.clientWidth || 800;
     const h = this.container.clientHeight || 500;
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x0d1117);
+    this.scene.background = new THREE.Color(0x0b0e14);
 
     this.camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 100);
     this.camera.position.set(5.5, 3.2, 5.5);
-    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     this.renderer.setSize(w, h);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.1;
     this.container.appendChild(this.renderer.domElement);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
@@ -145,10 +147,15 @@ class Map3DRenderer {
     this.controls.minDistance = 1.5;
     this.controls.maxDistance = 30;
 
-    this.scene.add(new THREE.AmbientLight(0xffffff, 0.75));
-    const dir = new THREE.DirectionalLight(0xffffff, 0.9);
-    dir.position.set(4, 6, 3);
+    // 三层灯光:环境 + 半球(天空/地面色) + 双方向光(主光 + 冷色补光)
+    this.scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+    this.scene.add(new THREE.HemisphereLight(0x9db8e0, 0x0b0e14, 0.55));
+    const dir = new THREE.DirectionalLight(0xffffff, 1.05);
+    dir.position.set(5, 7, 4);
     this.scene.add(dir);
+    const rim = new THREE.DirectionalLight(0x4f9cff, 0.4);
+    rim.position.set(-4, -2, -3);
+    this.scene.add(rim);
 
     // 辅助:细网格(零点居中,不再下沉)+ 坐标轴
     const grid = new THREE.GridHelper(12, 24, 0x2d333b, 0x21262d);
@@ -159,6 +166,8 @@ class Map3DRenderer {
     this.raycaster = new THREE.Raycaster();
     this.mouse = new THREE.Vector2();
     this.lines = [];               // 记录连线对象,render 时清理(避免残留)
+    this.labels = [];              // 常驻领域文字标签(Sprite)
+    this.halos = [];               // hot 领域光晕球
     this.tooltip = new MapTooltip(this.container);
     this.renderer.domElement.addEventListener("click", (e) => this._onClick(e));
     this.renderer.domElement.addEventListener("dblclick", (e) => this._onDblClick(e));
@@ -174,24 +183,54 @@ class Map3DRenderer {
     this.data = mapData;
     const view = this._computeView(mapData);
 
-    // 领域球:半径 ∝ 论文数,hot 发光
+    // 领域球:半径 ∝ 论文数,hot 发光 + 光晕 + 常驻标签
     const maxCount = Math.max(1, ...(view.domains || []).map((d) => d.paper_count || 0));
     for (const d of view.domains || []) {
       const isCenter = this.focus && d.key === this.focus.key;
+      const isHot = d.heat === "hot";
       const level = Math.min(d.level || 1, 3);
-      const radius = isCenter ? 0.22 : 0.09 + 0.05 * Math.sqrt((d.paper_count || 0) / maxCount) + (3 - level) * 0.015;
-      const geo = new THREE.SphereGeometry(Math.min(radius, 0.26), 20, 20);
+      const radius = isCenter ? 0.24 : 0.09 + 0.05 * Math.sqrt((d.paper_count || 0) / maxCount) + (3 - level) * 0.015;
+      const r = Math.min(radius, 0.26);
+      const color = isCenter ? 0xffffff : LEVEL_COLORS[level];
+      const geo = new THREE.SphereGeometry(r, 28, 28);
       const mat = new THREE.MeshPhongMaterial({
-        color: isCenter ? 0xffffff : LEVEL_COLORS[level],
-        transparent: true, opacity: 0.95,
-        emissive: isCenter ? 0xffffff : LEVEL_COLORS[level],
-        emissiveIntensity: isCenter ? 0.35 : HEAT_EMISSIVE[d.heat] || 0.15,
+        color,
+        specular: 0x1a2a3d,
+        shininess: 42,
+        transparent: true,
+        opacity: isCenter ? 1 : 0.96,
+        emissive: color,
+        emissiveIntensity: isCenter ? 0.4 : HEAT_EMISSIVE[d.heat] || 0.15,
       });
       const mesh = new THREE.Mesh(geo, mat);
       mesh.position.set(...d.xyz);
       mesh.userData = { type: "domain", key: d.key, name: d.name, paper_count: d.paper_count, heat: d.heat };
       this.scene.add(mesh);
       this.domainMesh.set(d.key, mesh);
+
+      // hot 领域光晕(半透明外球,渲染顺序靠后以贴合)
+      if (isHot && !isCenter) {
+        const halo = new THREE.Mesh(
+          new THREE.SphereGeometry(r * 2.1, 20, 20),
+          new THREE.MeshBasicMaterial({ color: 0x58a6ff, transparent: true, opacity: 0.1, depthWrite: false })
+        );
+        halo.position.copy(mesh.position);
+        this.scene.add(halo);
+        this.halos.push(halo);
+      }
+
+      // 常驻文字标签(level ≤ 2 或中心球)
+      if (isCenter || level <= 2) {
+        const label = this._makeLabel(
+          (isHot ? "🔥 " : "") + d.name,
+          isCenter ? 0xffffff : level <= 1 ? 0xa5d6ff : 0x8b949e,
+          level <= 1 ? 32 : 24,
+          level <= 1 ? 0.21 : 0.15
+        );
+        label.position.set(d.xyz[0], d.xyz[1] + r + 0.16, d.xyz[2]);
+        this.scene.add(label);
+        this.labels.push(label);
+      }
     }
 
     // 领域父子连线(仅域内)
@@ -207,9 +246,9 @@ class Map3DRenderer {
     const paperGroup = [];
     for (const p of view.papers || []) {
       const color = this._paperColor(p);
-      const geo = new THREE.SphereGeometry(0.045, 10, 10);
+      const geo = new THREE.SphereGeometry(0.04, 14, 14);
       const mat = new THREE.MeshPhongMaterial({
-        color, emissive: color, emissiveIntensity: 0.55, transparent: true, opacity: 0.92,
+        color, emissive: color, emissiveIntensity: 0.7, transparent: true, opacity: 0.92,
       });
       const mesh = new THREE.Mesh(geo, mat);
       mesh.position.set(...p.xyz);
@@ -220,7 +259,7 @@ class Map3DRenderer {
     }
     for (const { mesh, domainKey } of paperGroup) {
       const domain = this.domainMesh.get(domainKey);
-      if (domain) this._line(mesh.position, domain.position, 0x3fb950, 0.1);
+      if (domain) this._line(mesh.position, domain.position, this._paperColor({ domain_key: domainKey }), 0.1);
     }
     this._fit();
   }
@@ -395,6 +434,34 @@ class Map3DRenderer {
     return line;
   }
 
+  /** 常驻文字标签:Canvas 文字 → Sprite,始终面向相机。 */
+  _makeLabel(text, color, fontSize, scale) {
+    const pad = 6;
+    const font = `${fontSize}px "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif`;
+    const measure = document.createElement("canvas").getContext("2d");
+    measure.font = font;
+    const w = Math.ceil(measure.measureText(text).width) + pad * 2;
+    const h = fontSize + pad * 2;
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    ctx.font = font;
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "center";
+    ctx.shadowColor = "rgba(0,0,0,0.9)";
+    ctx.shadowBlur = 6;
+    ctx.fillStyle = "#" + new THREE.Color(color).getHexString();
+    ctx.fillText(text, w / 2, h / 2);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.minFilter = THREE.LinearFilter;
+    tex.generateMipmaps = false;
+    const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: true, depthWrite: false });
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(scale * (w / h), scale, 1);
+    return sprite;
+  }
+
   _fit() {
     // 仅基于领域/论文 mesh 计算包围盒(排除网格/坐标轴),保证零点居中
     const box = new THREE.Box3();
@@ -413,9 +480,13 @@ class Map3DRenderer {
   }
 
   _clear() {
-    // 先清连线(渲染时残留会导致子领域外连线不消失)
+    // 先清连线/标签/光晕(渲染时残留会导致子领域外元素不消失)
     for (const line of this.lines) this.scene.remove(line);
     this.lines = [];
+    for (const label of this.labels) this.scene.remove(label);
+    this.labels = [];
+    for (const halo of this.halos) this.scene.remove(halo);
+    this.halos = [];
     for (const mesh of this.domainMesh.values()) this.scene.remove(mesh);
     for (const mesh of this.paperMesh.values()) this.scene.remove(mesh);
     this.domainMesh.clear();
@@ -592,7 +663,7 @@ class Map2DRenderer {
     this.canvas.height = h * (window.devicePixelRatio || 1);
     ctx.setTransform(window.devicePixelRatio || 1, 0, 0, window.devicePixelRatio || 1, 0, 0);
 
-    ctx.fillStyle = "#0d1117";
+    ctx.fillStyle = "#0b0e14";
     ctx.fillRect(0, 0, w, h);
 
     // 网格

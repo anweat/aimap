@@ -5,6 +5,7 @@ export class SourcePanel {
     this.callbacks = callbacks || {};
     this.sources = [];
     this.pollers = new Map();   // jobId -> timer
+    this.manualActive = new Set();  // 手动登录进行中的来源名
   }
 
   async load() {
@@ -28,12 +29,19 @@ export class SourcePanel {
       const stats = src.last_crawl_stats || {};
       const isLib = src.source_type === "library";
       const sess = src.session || {};
+      const cred = src.credential || null;
       const sessText = isLib
         ? sess.has
           ? sess.expired ? "🔐 已过期" : "🔐 已登录"
           : "🔐 未登录"
         : "";
       const sessCls = sess.has && !sess.expired ? "src-sess-ok" : "src-sess-off";
+      const credText = isLib
+        ? cred && cred.configured
+          ? `👤 ${cred.account_mask || "已配置"}`
+          : "⚠ 未配置账号"
+        : "";
+      const manualActive = this.manualActive.has(src.name);
       const row = document.createElement("div");
       row.className = "source-row";
       row.dataset.name = src.name;
@@ -43,7 +51,10 @@ export class SourcePanel {
           <span class="src-name">${escapeHtml(src.display_name || src.name)}</span>
           <span class="src-type">${isLib ? "🔐 需登录" : "🌐 公开"}${sessText ? ` <span class="${sessCls}" title="登录会话: ${sess.expires_at || ""}">${sessText}</span>` : ""}</span>
           <span class="src-actions">
-            ${isLib ? `<button class="mini-btn" data-act="login" title="浏览器登录(复用 playwright)">🔑</button>` : ""}
+            ${isLib ? (manualActive
+              ? `<button class="mini-btn" data-act="manual-confirm" title="登录完成后点此确认保存会话">✓ 确认保存</button>`
+              : `<button class="mini-btn" data-act="login" title="自动检测登录(弹出浏览器)">🔑</button>
+                 <button class="mini-btn" data-act="manual" title="手动登录:弹出浏览器,走 SSO 学校认证后点确认">🖐 手动</button>`) : ""}
             <button class="mini-btn" data-act="probe" title="自动探测并给出适配建议">🔍</button>
             <button class="mini-btn" data-act="edit" title="编辑配置">✏️</button>
             <button class="mini-btn" data-act="delete" title="删除来源">🗑</button>
@@ -58,6 +69,7 @@ export class SourcePanel {
         <div class="src-stats">
           ${stats.saved !== undefined ? `上次采集: 入库 ${stats.saved} · 重复 ${stats.duplicates || 0} · 失败 ${stats.failed || 0}` : "尚未采集"}
           ${src.last_crawl_at ? ` · ${(src.last_crawl_at || "").slice(0, 16).replace("T", " ")}` : ""}
+          ${credText ? ` · ${credText}` : ""}
         </div>`;
       el.appendChild(row);
     }
@@ -73,6 +85,8 @@ export class SourcePanel {
         if (act === "crawl") this._crawl(row, name);
         else if (act === "probe") this._probe(name);
         else if (act === "login") this._login(name);
+        else if (act === "manual") this._manualLogin(name);
+        else if (act === "manual-confirm") this._manualConfirm(name);
         else if (act === "edit") this.callbacks.onEdit(name);
         else if (act === "delete") this._delete(name);
       });
@@ -113,6 +127,59 @@ export class SourcePanel {
       btn.disabled = false;
       btn.textContent = "🔑";
       this.load();  // 刷新会话状态
+    }
+  }
+
+  // ---- 手动登录(SSO 跳转学校认证,两步:弹出浏览器 → 点确认保存)----
+  async _manualLogin(name) {
+    const row = this.container.querySelector(`.source-row[data-name="${name}"]`);
+    const logBox = row.querySelector(".src-log");
+    logBox.innerHTML = "";
+    this._appendLog(logBox, "🖐 正在弹出浏览器(playwright)…");
+    try {
+      const r = await fetch(`/api/sources/${name}/manual-login`, { method: "POST" });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || !body.started) {
+        this._appendLog(logBox, `启动失败: ${body.detail || r.status}`, "err");
+        return;
+      }
+      this.manualActive.add(name);
+      this.render();
+      const row2 = this.container.querySelector(`.source-row[data-name="${name}"]`);
+      const log2 = row2 ? row2.querySelector(".src-log") : null;
+      if (log2) {
+        this._appendLog(log2, "浏览器已弹出。请完成登录(含跳转到学校统一认证),");
+        this._appendLog(log2, "登录成功、跳回图书馆页面后,点右上角「✓ 确认保存」。");
+      }
+    } catch (e) {
+      this._appendLog(logBox, `请求异常: ${e.message}`, "err");
+    }
+  }
+
+  async _manualConfirm(name) {
+    const row = this.container.querySelector(`.source-row[data-name="${name}"]`);
+    const logBox = row.querySelector(".src-log");
+    logBox.innerHTML = "";
+    this._appendLog(logBox, "正在保存会话并校验…");
+    try {
+      const r = await fetch(`/api/sources/${name}/manual-login/confirm`, { method: "POST" });
+      const body = await r.json().catch(() => ({}));
+      this.manualActive.delete(name);
+      if (body.status !== "ok") {
+        this._appendLog(logBox, `保存失败: ${body.detail || "未知"}`, "err");
+        toast(`✗ ${name} 会话保存失败`);
+        this.render();
+        return;
+      }
+      this._appendLog(logBox, `✓ 会话已保存 (cookie ${body.cookie_count} 个 · 至 ${(body.expires_at || "").slice(0, 16).replace("T", " ")})`);
+      this._appendLog(logBox, body.verified ? "✓ 自动校验通过" : "⚠ 自动校验未通过(可点 🔍 探测或直接采集实测)");
+      toast(`✓ ${name} 会话已保存${body.verified ? "" : "(校验未通过,建议探测实测)"}`);
+      this.render();
+      this.load();  // 刷新会话状态
+    } catch (e) {
+      this._appendLog(logBox, `请求异常: ${e.message}`, "err");
+      this.manualActive.delete(name);
+      this.render();
     }
   }
 
@@ -229,4 +296,12 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   }[c]));
+}
+
+function toast(msg) {
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3200);
 }

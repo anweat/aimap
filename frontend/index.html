@@ -132,6 +132,11 @@
           </select>
         </label>
         <label>API 端点 <input id="srcApiUrl" type="text" placeholder="https://… (open 类型)" /></label>
+        <div id="srcCredBlock" class="src-cred hidden">
+          <label>账号 <input id="srcAccount" type="text" autocomplete="off" placeholder="图书馆账号(学号/用户名),留空不修改" /></label>
+          <label>密码 <input id="srcPassword" type="password" autocomplete="new-password" placeholder="密码,留空不修改" /></label>
+          <div class="src-cred-hint">凭据经 SecretVault 加密落盘,明文不写库、不进日志</div>
+        </div>
         <label class="src-check"><input id="srcEnabled" type="checkbox" checked /> 启用该来源</label>
         <div class="btn-row">
           <button id="srcSaveBtn">保存</button>

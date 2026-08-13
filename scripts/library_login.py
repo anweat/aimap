@@ -1,15 +1,18 @@
 """图书馆模拟浏览器登录:登录 IEEE / ACM / CNKI 并保存会话。
 
 用法:
-  python scripts/library_login.py --source ieee                # 人工模式(弹出浏览器,手动登录)
-  python scripts/library_login.py --source acm --auto          # 自动填表(需站点选择器配置)
-  python scripts/library_login.py --source cnki --status       # 查看会话状态
-  python scripts/library_login.py --source ieee --verify       # 校验会话是否仍有效
-  python scripts/library_login.py --source ieee --headless     # 无头模式(需自动模式配合)
+  python scripts/library_login.py --source ieee --manual    # 手动确认模式(推荐:SSO 跳转学校认证)
+  python scripts/library_login.py --source ieee             # 自动检测模式(登录后自动保存)
+  python scripts/library_login.py --source acm --auto       # 自动填表(需站点选择器配置)
+  python scripts/library_login.py --source cnki --status    # 查看会话状态
+  python scripts/library_login.py --source ieee --verify    # 校验会话是否仍有效
 
-登录成功判定为全自动(检测会话 cookie + 站内 URL + 离开登录页),无需人工确认;
-保存会话后自动回访目标站校验。会话(cookie)保存于 data/sessions/<source>.json,
-后续爬虫复用该会话,无需重复登录。
+两种登录模式:
+  --manual 手动确认:弹出浏览器,你完成登录(含跳转到学校统一认证),回到终端按回车
+            即保存会话。不依赖自动检测,最稳,适合机构 SSO / CARSI 场景。
+  默认(自动检测):弹出浏览器,自动检测登录成功信号后保存(已排除游客态 cookie)。
+
+会话(cookie)保存于 data/sessions/<source>.json,后续爬虫复用,无需重复登录。
 """
 from __future__ import annotations
 
@@ -28,10 +31,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="图书馆登录会话管理")
     parser.add_argument("--source", required=True, choices=["ieee", "acm", "cnki"])
     parser.add_argument("--auto", action="store_true", help="自动填表模式(需配置站点选择器)")
+    parser.add_argument("--manual", action="store_true", help="手动确认模式:登录完成后回车保存(推荐 SSO 场景)")
     parser.add_argument("--headless", action="store_true", help="无头模式(默认有头,便于人工登录)")
     parser.add_argument("--status", action="store_true", help="查看会话状态")
     parser.add_argument("--verify", action="store_true", help="校验会话是否仍有效")
-    parser.add_argument("--timeout", type=int, default=600, help="登录等待超时(秒)")
+    parser.add_argument("--timeout", type=int, default=600, help="登录等待超时(秒,仅自动检测模式)")
     args = parser.parse_args()
 
     try:
@@ -65,6 +69,15 @@ def main() -> None:
 
     cred = settings.library_credentials[args.source]
     print(f"[auth:{args.source}] 账号配置: {'已配置' if cred['account'] else '未配置(可纯人工登录)'}")
+
+    if args.manual:
+        meta = manager.manual_login(headless=args.headless, verify=True)
+        if not meta.get("saved", True):
+            raise SystemExit(0)
+        print(f"[auth:{args.source}] 完成,校验结果: "
+              f"{'通过' if meta.get('verified') else '未通过(会话已保存,可 --verify 复查或直接采集实测)'}")
+        return
+
     try:
         meta = manager.login(
             account=cred["account"],

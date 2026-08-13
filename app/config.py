@@ -68,14 +68,79 @@ class Settings(BaseSettings):
             return ["*"]
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
-    @property
-    def library_credentials(self) -> dict[str, dict[str, str]]:
-        """图书馆凭据汇总:未配置账号的库返回空 dict(保持禁用)。"""
+    # 图书馆数据源名(凭据/会话/检索均以此为键)
+    LIBRARY_SOURCES: tuple[str, ...] = ("ieee", "acm", "cnki")
+
+    def _env_credentials(self) -> dict[str, dict[str, str]]:
+        """从 .env 读取的图书馆凭据(作为回退来源)。"""
         return {
             "ieee": {"account": self.lib_ieee_account, "password": self.lib_ieee_password},
             "acm": {"account": self.lib_acm_account, "password": self.lib_acm_password},
             "cnki": {"account": self.lib_cnki_account, "password": self.lib_cnki_password},
         }
+
+    @property
+    def library_credentials(self) -> dict[str, dict[str, str]]:
+        """图书馆凭据汇总。
+
+        优先级:SecretVault(数据源面板配置,加密存储)> .env(回退)。
+        任一来源读不到明文(跨机器/密钥缺失)时静默回退 .env,不抛异常。
+        """
+        creds = self._env_credentials()
+        try:
+            from app.security import get_vault
+
+            vault = get_vault()
+            for lib in creds:
+                for field in ("account", "password"):
+                    name = f"lib_{lib}_{field}"
+                    if vault.has(name):
+                        creds[lib][field] = vault.get(name)
+        except Exception:
+            pass  # SecretVault 不可用时保持 .env 回退
+        return creds
+
+    def has_library_credential(self, source: str) -> bool:
+        """某图书馆源是否已配置账号(SecretVault 或 .env)。"""
+        try:
+            from app.security import get_vault
+
+            if get_vault().has(f"lib_{source}_account"):
+                return True
+        except Exception:
+            pass
+        return bool(self._env_credentials().get(source, {}).get("account"))
+
+    def masked_library_account(self, source: str) -> str:
+        """脱敏账号(前 3 后 2),供界面展示;未配置返回空串。"""
+        account = self.library_credentials.get(source, {}).get("account", "") or ""
+        if not account:
+            return ""
+        if len(account) <= 6:
+            return account[0] + "*" * (len(account) - 1)
+        return f"{account[:3]}···{account[-2:]}"
+
+    def store_library_credential(self, source: str, account: str | None = None,
+                                 password: str | None = None) -> None:
+        """将图书馆凭据写入 SecretVault(加密存储,明文不落盘)。
+
+        None 表示不修改;空字符串表示删除该字段。
+        """
+        if source not in self.LIBRARY_SOURCES:
+            raise ValueError(f"未知图书馆数据源: {source}")
+        from app.security import get_vault
+
+        vault = get_vault()
+        if account is not None:
+            if account:
+                vault.set(f"lib_{source}_account", account)
+            else:
+                vault.delete(f"lib_{source}_account")
+        if password is not None:
+            if password:
+                vault.set(f"lib_{source}_password", password)
+            else:
+                vault.delete(f"lib_{source}_password")
 
 
 settings = Settings()

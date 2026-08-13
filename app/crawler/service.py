@@ -74,25 +74,7 @@ class CrawlService:
             if job.source == "arxiv":
                 self._crawl_arxiv(job, analyze=analyze)
             else:
-                # 图书馆来源:先检查登录会话,再按库实现
-                from app.crawler.auth import PlaywrightLoginManager, SessionExpired
-                from app.crawler.library import get_library_crawler
-
-                crawler = get_library_crawler(job.source)
-                if not crawler.is_available():
-                    raise CrawlerError(
-                        f"[{job.source}] 账号未配置:请在数据源面板或 .env 设置账号"
-                    )
-                manager = PlaywrightLoginManager(job.source)
-                if not manager.has_session():
-                    raise SessionExpired(
-                        f"[{job.source}] 尚未登录:请先运行 "
-                        f"python scripts/library_login.py --source {job.source}"
-                    )
-                raise NotImplementedError(
-                    f"[{job.source}] 站点检索尚未实现:登录会话已就绪,"
-                    f"请实现 crawl service 的 {job.source} 抓取逻辑"
-                )
+                self._crawl_library(job, analyze=analyze)
             update_job(self._session, job, status="done", last_error="", next_retry_at=None)
             add_crawl_log(self._session, job_id,
                           f"完成: 抓取 {job.total_fetched} · 入库 {job.total_saved}"
@@ -141,23 +123,7 @@ class CrawlService:
                 add_crawl_log(self._session, job.id, "无更多结果,提前结束")
                 break
 
-            for p in papers:
-                saved, result = upsert_paper_dedup(self._session, p)
-                if result == "saved":
-                    job.total_saved += 1
-                    if analyze:
-                        from app.agents.orchestrator import OrchestratorAgent
-
-                        OrchestratorAgent(self._session).analyze_paper(saved.id)
-                elif result == "updated":
-                    job.total_saved += 1  # 同源更新也算有效入库
-                    if analyze and not saved.anchored_domain_key:
-                        from app.agents.orchestrator import OrchestratorAgent
-
-                        OrchestratorAgent(self._session).analyze_paper(saved.id)
-                else:
-                    job.total_duplicates += 1
-                job.total_fetched += 1
+            self._ingest_papers(job, papers, analyze=analyze)
 
             # 每页完成即推进游标(断点续爬的基础)
             update_job(self._session, job, cursor=base_cursor + page + 1,
@@ -166,6 +132,42 @@ class CrawlService:
             add_crawl_log(self._session, job.id,
                           f"第 {base_cursor + page + 1} 页完成: 累计抓取 {job.total_fetched}"
                           f" · 入库 {job.total_saved} · 重复 {job.total_duplicates}")
+
+    # ------------------------------------------------------------------
+    # 图书馆采集(单次检索,复用登录态)
+    # ------------------------------------------------------------------
+    def _crawl_library(self, job: CrawlJob, *, analyze: bool) -> None:
+        from app.crawler.library import get_library_crawler
+
+        crawler = get_library_crawler(job.source)
+        if not crawler.is_available():
+            raise CrawlerError(f"[{job.source}] 账号未配置:请在数据源面板(📡 数据源 → 编辑)填写账号密码")
+        max_results = job.max_pages * PAGE_SIZE
+        add_crawl_log(self._session, job.id,
+                      f"[{job.source}] 检索 '{job.query}' (最多 {max_results} 篇,复用登录态)")
+        papers = crawler.search(job.query, max_results=max_results)
+        if not papers:
+            add_crawl_log(self._session, job.id, f"[{job.source}] 无结果或解析为空(站点结构可能变化)", level="warn")
+        else:
+            add_crawl_log(self._session, job.id, f"[{job.source}] 检索到 {len(papers)} 篇,开始入库")
+        self._ingest_papers(job, papers, analyze=analyze)
+        update_job(self._session, job, cursor=job.max_pages,
+                   total_fetched=job.total_fetched, total_saved=job.total_saved,
+                   total_duplicates=job.total_duplicates, total_failed=job.total_failed)
+
+    def _ingest_papers(self, job: CrawlJob, papers: list, *, analyze: bool) -> None:
+        """去重入库 + 计数 + 可选多层分析(arxiv 与图书馆共用)。"""
+        for p in papers:
+            saved, result = upsert_paper_dedup(self._session, p)
+            if result in ("saved", "updated"):
+                job.total_saved += 1  # 同源更新也算有效入库
+                if analyze and not (result == "updated" and saved.anchored_domain_key):
+                    from app.agents.orchestrator import OrchestratorAgent
+
+                    OrchestratorAgent(self._session).analyze_paper(saved.id)
+            else:
+                job.total_duplicates += 1
+            job.total_fetched += 1
 
     # ------------------------------------------------------------------
     # 来源统计回写
